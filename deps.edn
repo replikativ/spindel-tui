@@ -1,0 +1,19 @@
+{:paths ["src"]
+
+ :deps {org.clojure/clojure              {:mvn/version "1.12.0"}
+
+        ;; JLine for terminal I/O
+        org.jline/jline-terminal          {:mvn/version "3.27.1"}
+
+        ;; Markdown parsing + Clojure syntax highlighting
+        io.github.nextjournal/markdown    {:mvn/version "0.7.222"}
+        venantius/glow                    {:mvn/version "0.1.6"}
+
+        ;; Spindel for reactive signals (used by tui.clj runner)
+        is.simm/spindel                   {:local/root "../spindel"}
+        is.simm/partial-cps               {:local/root "../partial-cps"}}
+
+ :aliases
+ {:dev  {:extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}}}
+
+  :demo {:main-opts ["-m" "is.simm.spindel-tui.demo"]}}}
