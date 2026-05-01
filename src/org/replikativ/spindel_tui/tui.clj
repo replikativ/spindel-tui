@@ -1,4 +1,4 @@
-(ns is.simm.spindel-tui.tui
+(ns org.replikativ.spindel-tui.tui
   "Spindel-native TUI library.
 
    Simple architecture:

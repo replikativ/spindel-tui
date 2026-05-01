@@ -1,4 +1,4 @@
-(ns is.simm.spindel-tui.markdown
+(ns org.replikativ.spindel-tui.markdown
   "Markdown to ANSI terminal rendering.
 
    Uses nextjournal/markdown for parsing and glow for Clojure syntax highlighting."

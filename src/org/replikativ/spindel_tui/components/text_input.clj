@@ -1,10 +1,10 @@
-(ns is.simm.spindel-tui.components.text-input
+(ns org.replikativ.spindel-tui.components.text-input
   "Text input component with cursor movement and editing.
 
    State is stored in a Spindel signal. Use create-text-input to create
    a signal with initial state, then use the handle-key function to process
    input events."
-  (:require [is.simm.spindel-tui.style.core :as style]
+  (:require [org.replikativ.spindel-tui.style.core :as style]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------

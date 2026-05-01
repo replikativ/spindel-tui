@@ -1,7 +1,7 @@
-(ns is.simm.spindel-tui.style.layout
+(ns org.replikativ.spindel-tui.style.layout
   "Layout utilities: padding, margin, alignment, and joining."
-  (:require [is.simm.spindel-tui.style.width :as w]
-            [is.simm.spindel-tui.style.color :as color]
+  (:require [org.replikativ.spindel-tui.style.width :as w]
+            [org.replikativ.spindel-tui.style.color :as color]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------

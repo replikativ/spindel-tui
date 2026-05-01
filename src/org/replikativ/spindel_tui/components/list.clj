@@ -1,9 +1,9 @@
-(ns is.simm.spindel-tui.components.list
+(ns org.replikativ.spindel-tui.components.list
   "Scrollable list component with item selection.
 
    State is stored in a Spindel signal. Use list-state to create
    initial state, then use handle-key to process navigation events."
-  (:require [is.simm.spindel-tui.style.core :as style]
+  (:require [org.replikativ.spindel-tui.style.core :as style]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------

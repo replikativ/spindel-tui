@@ -1,4 +1,4 @@
-(ns is.simm.spindel-tui.style.color
+(ns org.replikativ.spindel-tui.style.color
   "Terminal color handling.
 
    Supports:

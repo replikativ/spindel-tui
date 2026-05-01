@@ -1,9 +1,9 @@
-(ns is.simm.spindel-tui.components.progress
+(ns org.replikativ.spindel-tui.components.progress
   "Progress bar component.
 
    State is stored in a Spindel signal. Use progress-state to create
    initial state, then use set-progress to update."
-  (:require [is.simm.spindel-tui.style.core :as style]))
+  (:require [org.replikativ.spindel-tui.style.core :as style]))
 
 ;; ---------------------------------------------------------------------------
 ;; Progress Bar Styles

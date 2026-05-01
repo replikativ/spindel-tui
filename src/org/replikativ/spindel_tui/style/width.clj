@@ -1,4 +1,4 @@
-(ns is.simm.spindel-tui.style.width
+(ns org.replikativ.spindel-tui.style.width
   "Text width calculation for terminal display.
 
    Handles:

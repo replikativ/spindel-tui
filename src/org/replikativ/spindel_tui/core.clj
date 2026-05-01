@@ -1,4 +1,4 @@
-(ns is.simm.spindel-tui.core
+(ns org.replikativ.spindel-tui.core
   "Spindel-native TUI - Low-level JLine primitives.
 
    This provides a non-Spindel TUI runner for testing JLine directly.

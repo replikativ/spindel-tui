@@ -1,4 +1,4 @@
-(ns is.simm.spindel-tui.style.core
+(ns org.replikativ.spindel-tui.style.core
   "Main styling API.
 
    Create styles as maps and apply them to text.
@@ -6,10 +6,10 @@
    Example:
      (def my-style (style :fg (rgb 255 0 0) :bold true :padding [1 2]))
      (render my-style \"Hello!\")  ; => styled text"
-  (:require [is.simm.spindel-tui.style.color :as c]
-            [is.simm.spindel-tui.style.border :as b]
-            [is.simm.spindel-tui.style.layout :as l]
-            [is.simm.spindel-tui.style.width :as w]
+  (:require [org.replikativ.spindel-tui.style.color :as c]
+            [org.replikativ.spindel-tui.style.border :as b]
+            [org.replikativ.spindel-tui.style.layout :as l]
+            [org.replikativ.spindel-tui.style.width :as w]
             [clojure.string :as str])
   (:import [org.jline.utils AttributedString AttributedStringBuilder AttributedStyle]))
 
@@ -46,7 +46,7 @@
      :margin     - Margin [top right bottom left] or single value
 
      ;; Border
-     :border     - Border style (from is.simm.spindel-tui.style.border)
+     :border     - Border style (from org.replikativ.spindel-tui.style.border)
      :border-fg  - Border foreground color
      :border-bg  - Border background color
 

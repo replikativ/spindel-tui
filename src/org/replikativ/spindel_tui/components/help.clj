@@ -1,10 +1,10 @@
-(ns is.simm.spindel-tui.components.help
+(ns org.replikativ.spindel-tui.components.help
   "Help component for displaying key bindings.
 
    State is stored in a Spindel signal. Use help-state to create
    initial state with bindings."
-  (:require [is.simm.spindel-tui.style.core :as style]
-            [is.simm.spindel-tui.style.width :as w]
+  (:require [org.replikativ.spindel-tui.style.core :as style]
+            [org.replikativ.spindel-tui.style.width :as w]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------

@@ -1,9 +1,9 @@
-(ns is.simm.spindel-tui.components.spinner
+(ns org.replikativ.spindel-tui.components.spinner
   "Animated spinner component.
 
    State is stored in a Spindel signal. Use spinner-state to create
    initial state, then call tick to advance the animation."
-  (:require [is.simm.spindel-tui.style.core :as style]))
+  (:require [org.replikativ.spindel-tui.style.core :as style]))
 
 ;; ---------------------------------------------------------------------------
 ;; Spinner Types

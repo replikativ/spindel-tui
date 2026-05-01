@@ -1,9 +1,9 @@
-(ns is.simm.spindel-tui.components.paginator
+(ns org.replikativ.spindel-tui.components.paginator
   "Pagination component for displaying page indicators.
 
    State is stored in a Spindel signal. Use paginator-state to create
    initial state, then use navigation functions to change pages."
-  (:require [is.simm.spindel-tui.style.core :as style]))
+  (:require [org.replikativ.spindel-tui.style.core :as style]))
 
 ;; ---------------------------------------------------------------------------
 ;; Paginator State

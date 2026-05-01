@@ -1,12 +1,12 @@
-(ns is.simm.spindel-tui.demo
+(ns org.replikativ.spindel-tui.demo
   "Integrated demo showcasing all spindel-tui components."
-  (:require [is.simm.spindel-tui.tui :as tui]
-            [is.simm.spindel-tui.style.core :as s]
-            [is.simm.spindel-tui.style.border :as b]
-            [is.simm.spindel-tui.components.text-input :as ti]
-            [is.simm.spindel-tui.components.list :as lst]
-            [is.simm.spindel-tui.components.spinner :as spinner]
-            [is.simm.spindel-tui.components.progress :as prog]
+  (:require [org.replikativ.spindel-tui.tui :as tui]
+            [org.replikativ.spindel-tui.style.core :as s]
+            [org.replikativ.spindel-tui.style.border :as b]
+            [org.replikativ.spindel-tui.components.text-input :as ti]
+            [org.replikativ.spindel-tui.components.list :as lst]
+            [org.replikativ.spindel-tui.components.spinner :as spinner]
+            [org.replikativ.spindel-tui.components.progress :as prog]
             [org.replikativ.spindel.engine.core :as ec]
             [org.replikativ.spindel.engine.context :as ctx]
             [org.replikativ.spindel.signal :as sig]

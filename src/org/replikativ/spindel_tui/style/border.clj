@@ -1,7 +1,7 @@
-(ns is.simm.spindel-tui.style.border
+(ns org.replikativ.spindel-tui.style.border
   "Border rendering for styled boxes."
-  (:require [is.simm.spindel-tui.style.width :as w]
-            [is.simm.spindel-tui.style.color :as color]
+  (:require [org.replikativ.spindel-tui.style.width :as w]
+            [org.replikativ.spindel-tui.style.color :as color]
             [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------

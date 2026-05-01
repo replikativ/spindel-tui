@@ -1,9 +1,9 @@
-(ns is.simm.spindel-tui.components.timer
+(ns org.replikativ.spindel-tui.components.timer
   "Countdown/stopwatch timer component.
 
    State is stored in a Spindel signal. Use timer-state to create
    initial state, then call tick periodically to update."
-  (:require [is.simm.spindel-tui.style.core :as style]))
+  (:require [org.replikativ.spindel-tui.style.core :as style]))
 
 ;; ---------------------------------------------------------------------------
 ;; Timer State

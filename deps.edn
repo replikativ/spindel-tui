@@ -10,10 +10,10 @@
         venantius/glow                    {:mvn/version "0.1.6"}
 
         ;; Spindel for reactive signals (used by tui.clj runner)
-        is.simm/spindel                   {:local/root "../spindel"}
-        is.simm/partial-cps               {:local/root "../partial-cps"}}
+        org.replikativ/spindel            {:git/url "https://github.com/replikativ/spindel"
+                                           :git/sha "7bcb49d5e6a0e633f93c8e58bf90e8a6574ca94b"}}
 
  :aliases
  {:dev  {:extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}}}
 
-  :demo {:main-opts ["-m" "is.simm.spindel-tui.demo"]}}}
+  :demo {:main-opts ["-m" "org.replikativ.spindel-tui.demo"]}}}
