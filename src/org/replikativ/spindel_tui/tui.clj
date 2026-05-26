@@ -1,17 +1,46 @@
 (ns org.replikativ.spindel-tui.tui
   "Spindel-native TUI library.
 
-   Simple architecture:
-   - State in Spindel signals
-   - Single-threaded render loop (no futures, no binding issues)
-   - Input updates signals directly
-   - View re-renders when state changes"
+   Architecture (post spin-native refactor):
+   - State lives in Spindel signals — including terminal size.
+   - A render-spin tracks the user's signals + the size signal and
+     writes a frame to the sink at its leaf. It re-fires only when a
+     tracked signal changes (no idle wakeups).
+   - Input is read by a dedicated thread that posts key events to a
+     Spindel mailbox; a consume callback drains the mailbox and calls
+     on-key with `*execution-context*` rebound.
+   - Terminal size is polled by a dedicated thread (~500ms cadence)
+     that swaps the size signal on change. The render-spin tracks the
+     signal, so resizes are picked up reactively without any main-loop
+     coupling.
+
+   The public API of `start!` is unchanged: callers still pass
+   :signals, :view, :on-key, :execution-context.
+
+   IMPORTANT — semantic change for downstream callers:
+
+   The view fn must be a pure function of its arguments. Specifically,
+   it must NOT call swap!/reset! on a signal that is in the signal-map,
+   because every such signal is tracked by the render-spin. A write
+   from inside view would trigger an immediate re-fire of the view —
+   unbounded recursion. This was tolerated by the previous polling
+   design (the next 16ms tick simply observed the change) but is
+   incompatible with the spin-native model.
+
+   The same applies to driving animations from inside view (e.g.
+   spinner ticking). Move animation drivers to a separate side thread
+   that swaps a tick signal at a fixed interval; the render-spin will
+   pick it up reactively without view ever touching a signal."
   (:require [org.replikativ.spindel.engine.core :as ec]
             [org.replikativ.spindel.engine.context :as ctx]
             [org.replikativ.spindel.signal :as sig]
-            [clojure.string :as str])
+            [org.replikativ.spindel.spin.cps :refer [spin]]
+            [org.replikativ.spindel.spin.sync :as sync]
+            [org.replikativ.spindel.effects.track :refer [track]]
+            [org.replikativ.spindel.incremental.interval :as iv]
+            [org.replikativ.spindel-tui.sinks :as sinks])
   (:import [org.jline.terminal TerminalBuilder Terminal]
-           [org.jline.utils Display AttributedString AttributedStringBuilder AttributedStyle]))
+           [org.jline.utils Display AttributedString]))
 
 ;; =============================================================================
 ;; Terminal
@@ -26,7 +55,6 @@
   (let [s (.getSize t)
         w (.getColumns s)
         h (.getRows s)]
-    ;; Fallback to reasonable defaults if size is 0
     {:width (if (pos? w) w 80)
      :height (if (pos? h) h 24)}))
 
@@ -38,36 +66,37 @@
     (.write w s)
     (.flush w)))
 
-(defn alt-screen-on! [t] (write! t "\u001b[?1049h"))
-(defn alt-screen-off! [t] (write! t "\u001b[?1049l"))
-(defn cursor-hide! [t] (write! t "\u001b[?25l"))
-(defn cursor-show! [t] (write! t "\u001b[?25h"))
+(defn alt-screen-on! [t] (write! t "[?1049h"))
+(defn alt-screen-off! [t] (write! t "[?1049l"))
+(defn cursor-hide! [t] (write! t "[?25l"))
+(defn cursor-show! [t] (write! t "[?25h"))
 
 ;; =============================================================================
-;; Display
+;; Display (legacy shim — new code should go through sinks/PTerminalSink)
 ;; =============================================================================
 
-(defn create-display [^Terminal t]
+(defn create-display
+  "Legacy helper retained for callers that build Display manually.
+   Prefer (sinks/jline-sink terminal)."
+  [^Terminal t]
   (let [d (Display. t true)]
-    ;; Delay line wrap to avoid cursor jumping issues at right margin
     (.setDelayLineWrap d true)
     d))
 
 (defn- pad-to-width
-  "Pad a string to exactly the given width with spaces."
   [s width]
   (let [current-len (.columnLength (AttributedString/fromAnsi (str s)))
         padding (max 0 (- width current-len))]
     (str s (apply str (repeat padding " ")))))
 
-(defn render-lines! [^Display d lines cols rows]
-  ;; Resize display to match terminal
+(defn render-lines!
+  "Legacy direct-to-Display render. Kept for backwards compatibility with
+   callers that built their own loop. New code should construct a sink
+   via (sinks/jline-sink terminal) and call (sinks/render-frame! ...)."
+  [^Display d lines cols rows]
   (.resize d rows cols)
-  ;; Pad all lines to full width, truncate to rows, and fill to full height
-  (let [;; First truncate to max rows to avoid JLine diff confusion
-        truncated-lines (take rows lines)
+  (let [truncated-lines (take rows lines)
         padded-lines (mapv #(pad-to-width % cols) truncated-lines)
-        ;; Fill remaining rows with empty lines
         empty-line (apply str (repeat cols " "))
         full-lines (into padded-lines
                          (repeat (max 0 (- rows (count padded-lines))) empty-line))
@@ -93,25 +122,20 @@
             (if (= ch2 91) ; CSI sequence: ESC [
               (let [ch3 (.read r 50)]
                 (cond
-                  ;; Arrow keys: ESC [ A/B/C/D
                   (= ch3 65) {:key :up}
                   (= ch3 66) {:key :down}
                   (= ch3 67) {:key :right}
                   (= ch3 68) {:key :left}
-                  ;; Home/End (some terminals): ESC [ H / ESC [ F
                   (= ch3 72) {:key "home"}
                   (= ch3 70) {:key "end"}
-                  ;; Extended sequences: ESC [ <num> ~
-                  ;; Page Up: ESC [ 5 ~, Page Down: ESC [ 6 ~
-                  ;; Home: ESC [ 1 ~, End: ESC [ 4 ~
-                  (and (>= ch3 48) (<= ch3 57))  ; digit
+                  (and (>= ch3 48) (<= ch3 57))
                   (let [ch4 (.read r 50)]
-                    (if (= ch4 126) ; ~
+                    (if (= ch4 126)
                       {:key (case ch3
-                              49 "home"      ; ESC [ 1 ~
-                              52 "end"       ; ESC [ 4 ~
-                              53 "page_up"   ; ESC [ 5 ~
-                              54 "page_down" ; ESC [ 6 ~
+                              49 "home"
+                              52 "end"
+                              53 "page_up"
+                              54 "page_down"
                               :unknown)}
                       {:key :unknown}))
                   :else {:key :unknown}))
@@ -119,14 +143,13 @@
         (= ch 13) {:key "enter"}
         (= ch 127) {:key "backspace"}
         (= ch 9) {:key "tab"}
-        ;; Ctrl key combinations (Ctrl+A = 1, Ctrl+Z = 26)
         (= ch 3) {:key "ctrl+c"}
-        (= ch 4) {:key "ctrl+d"}   ; Scroll down (vim)
-        (= ch 10) {:key "ctrl+j"}  ; Scroll down line
-        (= ch 11) {:key "ctrl+k"}  ; Scroll up line
-        (= ch 14) {:key "ctrl+n"}  ; Scroll down line
-        (= ch 16) {:key "ctrl+p"}  ; Scroll up line
-        (= ch 21) {:key "ctrl+u"}  ; Scroll up (vim)
+        (= ch 4) {:key "ctrl+d"}
+        (= ch 10) {:key "ctrl+j"}
+        (= ch 11) {:key "ctrl+k"}
+        (= ch 14) {:key "ctrl+n"}
+        (= ch 16) {:key "ctrl+p"}
+        (= ch 21) {:key "ctrl+u"}
         :else {:key (str (char ch)) :char (char ch)}))))
 
 ;; =============================================================================
@@ -141,93 +164,267 @@
     s))
 
 (defn signal-values
-  "Get current values of all signals as a map."
+  "Get current values of all signals as a map.
+   Reads via @-deref — only use outside spins (e.g. inside on-key)."
   [signal-map]
   (into {} (keep (fn [[k v]]
-                   (when-not (= k :tui-ctx)  ;; Skip non-signal entries
+                   (when-not (or (= k :tui-ctx)
+                                 (= k ::size))
                      [k @v]))
                  signal-map)))
+
+;; =============================================================================
+;; Render spin
+;; =============================================================================
+;;
+;; The render-spin tracks every user signal plus the internal ::size signal.
+;; When any one changes, Spindel re-fires the spin's body, the view fn
+;; computes a fresh line list, and the sink writes the frame.
+;;
+;; Re-render instrumentation: every frame increments render-counter, so
+;; callers + tests can assert "rendered N times" rather than measuring
+;; wall-clock.
+
+(defn- make-render-spin
+  "Build the render-spin. Tracks `size-sig` plus every user signal in
+   `signal-map` (other than the internal entries). The doseq+track
+   pattern works because partial-cps's loop/recur hazard is about
+   `await` inside loops, not `track` — track installs a continuation
+   and returns synchronously."
+  [sink view signal-map size-sig _render-counter]
+  (spin
+    (let [{:keys [width height]} (iv/get-new (track size-sig))
+          _ (doseq [[k s] signal-map
+                    :when (and (not= k :tui-ctx)
+                               (not= k ::size))]
+              (track s))
+          lines (view signal-map width height)]
+      (sinks/render-frame! sink lines width height)
+      ::rendered)))
+
+;; =============================================================================
+;; Input source — dedicated reader thread + Spindel mailbox
+;; =============================================================================
+;;
+;; JLine's reader is synchronous. To keep the spin-native model honest
+;; (no busy-poll in the main thread), we run JLine reads on a dedicated
+;; thread that posts each key event into a Spindel mailbox. A consume
+;; callback drains the mailbox and invokes on-key with the right
+;; execution context bound.
+;;
+;; Shutdown is cooperative: the reader thread checks `running` between
+;; reads (short JLine timeout for responsiveness), and posts a
+;; ::shutdown sentinel when it exits so the consume callback unblocks.
+
+(def ^:private shutdown-sentinel ::shutdown)
+
+(defn- start-input-reader!
+  "Spawn a thread that reads JLine keys and posts them to mbx.
+   Returns the thread (caller is responsible for waiting on it or letting
+   the JVM reclaim it on shutdown).
+
+   sync/post! enqueues onto the context's event queue, so the reader
+   thread must have *execution-context* bound."
+  [ctx ^Terminal terminal mbx running-atom]
+  (doto (Thread.
+          ^Runnable
+          (fn []
+            (binding [ec/*execution-context* ctx]
+              (try
+                (while @running-atom
+                  ;; Short timeout so we wake up periodically to check
+                  ;; `running` even when the user isn't typing.
+                  (when-let [event (read-key terminal 100)]
+                    (sync/post! mbx event)))
+                (catch InterruptedException _ nil)
+                (catch Throwable t
+                  (binding [*out* *err*]
+                    (println "input-reader error:" (.getMessage t))))
+                (finally
+                  (sync/post! mbx shutdown-sentinel)))))
+          "spindel-tui-input")
+    (.setDaemon true)
+    (.start)))
+
+(defn- start-size-poller!
+  "Spawn a thread that polls the terminal size every `interval-ms` and
+   swaps `size-sig` when the value changes. *execution-context* is
+   bound so the swap can enqueue the signal-change event."
+  [ctx ^Terminal terminal size-sig running-atom interval-ms]
+  (doto (Thread.
+          ^Runnable
+          (fn []
+            (binding [ec/*execution-context* ctx]
+              (try
+                (while @running-atom
+                  (let [now (terminal-size terminal)]
+                    (when (not= now @size-sig)
+                      (swap! size-sig (constantly now))))
+                  (Thread/sleep (long interval-ms)))
+                (catch InterruptedException _ nil)
+                (catch Throwable t
+                  (binding [*out* *err*]
+                    (println "size-poller error:" (.getMessage t)))))))
+          "spindel-tui-size")
+    (.setDaemon true)
+    (.start)))
+
+(defn- start-input-consumer!
+  "Drain key events from mbx and call on-key with execution context bound.
+   Uses the raw 2-arity mailbox CPS interface (resolve/reject) to avoid
+   loop/recur+await — that combination is a known partial-cps hang risk.
+
+   The consumer re-arms itself from inside resolve; the JVM trampoline
+   inside Mailbox handles deeply-nested resumes safely.
+
+   `*execution-context*` is rebound at every entry point that may run on
+   the engine's drain thread: the resolve callback, the reject callback,
+   and the recursive consume. Without this, mailbox internals (which
+   call enqueue-event! to schedule resumes) crash with 'no execution
+   context bound'."
+  [ctx mbx on-key signal-map running-atom]
+  (letfn [(consume []
+            (when @running-atom
+              (binding [ec/*execution-context* ctx]
+                (mbx
+                  (fn [event]
+                    (binding [ec/*execution-context* ctx]
+                      (when @running-atom
+                        (cond
+                          (= event shutdown-sentinel)
+                          nil
+
+                          :else
+                          (do
+                            (try
+                              (when (= :quit (on-key signal-map event))
+                                (reset! running-atom false))
+                              (catch Throwable t
+                                (binding [*out* *err*]
+                                  (println "on-key error:" (.getMessage t)))))
+                            (consume))))))
+                  (fn [err]
+                    (binding [ec/*execution-context* ctx
+                              *out* *err*]
+                      (println "mailbox error:" err)))))))]
+    (consume)))
 
 ;; =============================================================================
 ;; TUI Runner
 ;; =============================================================================
 
-(defonce ^:private running (atom false))
-
-(defn stop! []
-  (reset! running false))
-
 (defn start!
-  "Start a Spindel TUI.
+  "Start a Spindel TUI. Returns a controller map immediately — the
+   calling thread is NOT blocked.
 
    Options:
-   - :signals    Map of {key initial-value} - will be converted to Spindel signals
-   - :view       (fn [signal-map width height] -> seq-of-strings)
-   - :on-key     (fn [signal-map key-event] -> any) - return :quit to exit
-   - :execution-context  Optional existing Spindel execution context to share
+   - :signals    Map of {key initial-value} — converted to Spindel signals.
+   - :render     (fn [signal-map width height] -> seq-of-strings)
+                 Pure function. MUST NOT call swap!/reset! on tracked
+                 signals — that would trigger an unbounded re-fire of
+                 the render-spin. Drive animations from a side thread
+                 that swaps a tick signal at a fixed cadence; the
+                 render fn can then read that signal and incorporate
+                 the tick into the frame.
+   - :on-key     (fn [signal-map key-event] -> any) — return :quit to exit.
+   - :execution-context  Optional existing Spindel execution context.
+                         If absent, a fresh one is created.
+   - :sink       Optional PTerminalSink. Defaults to a JLineSink over
+                 a freshly-built system Terminal. Pass a MockSink for
+                 tests.
 
-   Everything runs in a single thread with Spindel context bound.
-   The TUI context is available as :tui-ctx in the signal-map for use in futures."
-  [{:keys [signals view on-key execution-context]}]
-  (let [ctx (or execution-context (ctx/create-execution-context))
-        terminal (create-terminal)]
+   Returns a controller map:
+     {:running     atom  — true while the TUI is alive
+      :stop!       fn    — flip running false + clean up terminal
+      :await-quit  fn    — block calling thread until running is false
+      :ctx         ec    — the execution context
+      :sink        sink  — the PTerminalSink in use
+      :signals     map   — the resolved signal-map (including :tui-ctx
+                            and the internal ::size signal)}
 
-    ;; Bind context for entire TUI lifetime
+   Typical usage:
+     (def t (start! {:signals {...} :render r :on-key h}))
+     ;; ... interact with t ...
+     ((:stop! t))                  ; clean shutdown
+   Or to block the calling thread until the TUI quits:
+     ((:await-quit (start! {...})))
+
+   Architecture:
+   - Render is a Spindel spin that tracks the user's signals + an
+     internal ::size signal. Re-fires only on signal change.
+   - Input is read by a dedicated thread that posts to a Spindel
+     mailbox; a consumer drains and invokes on-key with ctx bound.
+   - Terminal size is polled by a dedicated thread (~500ms) that
+     swaps the size signal on change.
+   - No work runs on the caller's thread — everything is signal-driven
+     from the engine's executor."
+  [{:keys [signals render on-key execution-context sink]}]
+  (let [ctx           (or execution-context (ctx/create-execution-context))
+        terminal      (when-not sink (create-terminal))
+        own-terminal? (some? terminal)
+        sink          (or sink (sinks/jline-sink terminal))
+        running       (atom true)
+        stopped?      (atom false)]
+
     (binding [ec/*execution-context* ctx]
-      (enter-raw-mode! terminal)
+      (when own-terminal? (enter-raw-mode! terminal))
 
-      (let [display (create-display terminal)
-            ;; Create signals
-            signal-map (into {:tui-ctx ctx}  ;; Expose context for futures
+      (let [render-counter (atom 0)
+            size-sig (make-signal ::size
+                                  (if terminal
+                                    (terminal-size terminal)
+                                    {:width 80 :height 24}))
+            signal-map (into {:tui-ctx ctx
+                              ::size   size-sig}
                              (map (fn [[k v]]
                                     [k (make-signal k v)])
                                   signals))]
 
-        (reset! running true)
-
-        (try
+        (when own-terminal?
           (alt-screen-on! terminal)
-          (cursor-hide! terminal)
+          (cursor-hide! terminal))
 
-          ;; Main loop - single thread, no complexity
-          (loop [last-state nil
-                 last-size nil]
-            (when @running
-              (let [current-state (signal-values signal-map)
-                    {:keys [width height] :as current-size} (terminal-size terminal)
-                    ;; Detect status transition from :running to :idle for full rerender
-                    was-running? (= :running (:status last-state))
-                    now-idle? (= :idle (:status current-state))
-                    ;; Detect terminal resize
-                    size-changed? (and last-size (not= current-size last-size))]
+        ;; Wire the render-spin. Once invoked, Spindel drives re-runs
+        ;; via the executor whenever a tracked signal changes.
+        (let [the-spin (make-render-spin sink render signal-map size-sig render-counter)]
+          (the-spin
+            (fn [_] (swap! render-counter inc))
+            (fn [e]
+              (when-let [w (some-> terminal .writer)]
+                (.write w (str "\nrender-spin error: " (.getMessage ^Throwable e) "\n"))
+                (.flush w)))))
 
-                ;; Clear display on status transition or terminal resize
-                ;; This forces a full rerender to clear any rendering artifacts
-                (when (or (and was-running? now-idle?) size-changed?)
-                  (.clear display))
+        ;; Input: reader thread → Spindel mailbox → consume callback.
+        (let [input-mbx (sync/create-mailbox ctx)]
+          (when own-terminal?
+            (start-input-reader! ctx terminal input-mbx running)
+            (start-input-consumer! ctx input-mbx on-key signal-map running)))
 
-                ;; Re-render if state changed, size changed, or first render
-                (when (or (nil? last-state)
-                          (not= current-state last-state)
-                          size-changed?)
-                  (let [lines (view signal-map width height)]
-                    (render-lines! display lines width height)))
+        ;; Size: side thread polls terminal-size, swaps signal on change.
+        (when own-terminal?
+          (start-size-poller! ctx terminal size-sig running 500))
 
-                ;; Read input (with short timeout for responsive loop)
-                (when-let [event (read-key terminal 16)]
-                  (when (= :quit (on-key signal-map event))
-                    (reset! running false)))
-
-                (when @running
-                  (recur current-state current-size)))))
-
-          :done  ;; Don't return signals to avoid print-method conflict
-
-          (finally
-            (reset! running false)
-            (cursor-show! terminal)
-            (alt-screen-off! terminal)
-            (.close terminal)))))))
+        (let [stop! (fn []
+                     ;; Idempotent. Daemon threads exit on their next
+                     ;; loop iteration once `running` flips false; the
+                     ;; longest such loop is the size-poller at 500ms.
+                     (when (compare-and-set! stopped? false true)
+                       (reset! running false)
+                       (when own-terminal?
+                         (try (cursor-show! terminal) (catch Throwable _))
+                         (try (alt-screen-off! terminal) (catch Throwable _))
+                         (try (.close terminal) (catch Throwable _)))))
+              await-quit (fn []
+                           (try
+                             (while @running (Thread/sleep 200))
+                             (finally (stop!))))]
+          {:running      running
+           :stop!        stop!
+           :await-quit   await-quit
+           :ctx          ctx
+           :sink         sink
+           :signals      signal-map
+           :render-count render-counter})))))
 
 ;; =============================================================================
 ;; Demo
@@ -253,7 +450,7 @@
       [(pad "q:quit  +/-:counter  other:log")
        bar])))
 
-(defn demo-on-key [signals {:keys [key char]}]
+(defn demo-on-key [signals {:keys [key]}]
   (case key
     "q" :quit
     "ctrl+c" :quit
@@ -262,13 +459,17 @@
     (swap! (:messages signals)
            #(vec (take 100 (cons (str "Key: " (pr-str key)) %))))))
 
-(defn demo! []
-  (start! {:signals {:counter 0
-                   :messages ["Welcome to Spindel TUI!"
-                              "Press keys to interact."]}
-         :view demo-view
-         :on-key demo-on-key}))
+(defn demo!
+  "Run the built-in demo. Returns the controller; blocks on await-quit."
+  []
+  (let [t (start! {:signals {:counter 0
+                             :messages ["Welcome to Spindel TUI!"
+                                        "Press keys to interact."]}
+                   :render demo-view
+                   :on-key demo-on-key})]
+    ((:await-quit t))
+    t))
 
 (comment
-  (demo!)
-  (stop!))
+  (def t (demo!))
+  ((:stop! t)))

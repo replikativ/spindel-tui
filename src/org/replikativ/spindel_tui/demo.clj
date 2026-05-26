@@ -2,24 +2,12 @@
   "Integrated demo showcasing all spindel-tui components."
   (:require [org.replikativ.spindel-tui.tui :as tui]
             [org.replikativ.spindel-tui.style.core :as s]
-            [org.replikativ.spindel-tui.style.border :as b]
             [org.replikativ.spindel-tui.components.text-input :as ti]
             [org.replikativ.spindel-tui.components.list :as lst]
             [org.replikativ.spindel-tui.components.spinner :as spinner]
             [org.replikativ.spindel-tui.components.progress :as prog]
             [org.replikativ.spindel.engine.core :as ec]
-            [org.replikativ.spindel.engine.context :as ctx]
-            [org.replikativ.spindel.signal :as sig]
             [clojure.string :as str]))
-
-;; ---------------------------------------------------------------------------
-;; Demo State Setup
-;; ---------------------------------------------------------------------------
-
-(defn- make-signal [id initial]
-  (let [s (sig/->SignalRef id initial)]
-    (sig/ensure-signal-initialized! s)
-    s))
 
 ;; ---------------------------------------------------------------------------
 ;; Demo View
@@ -167,85 +155,58 @@
             (swap! (:messages signals) #(cons (str "Selected: " item) (take 10 %)))))))))
 
 ;; ---------------------------------------------------------------------------
-;; Main Loop with Spinner Animation
+;; Demo Driver
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private running (atom false))
+(defn- start-spinner-driver!
+  "Tick the spinner signal every 80ms on a daemon thread. Stops when
+   the controller's running atom flips false.
 
-(defn stop! [] (reset! running false))
+   This is the canonical pattern for animation in the spin-native
+   model: drivers live OUTSIDE the render-spin and swap! a signal at
+   a fixed cadence. The render-spin tracks the spinner signal and
+   re-renders only on tick (no busy-poll, no swap! inside render)."
+  [{:keys [ctx running signals]}]
+  (doto (Thread.
+          ^Runnable
+          (fn []
+            (binding [ec/*execution-context* ctx]
+              (while @running
+                (try
+                  (swap! (:spinner signals) spinner/tick)
+                  (Thread/sleep 80)
+                  (catch InterruptedException _ nil)))))
+          "spindel-tui-demo-spinner")
+    (.setDaemon true)
+    (.start)))
 
 (defn demo!
-  "Run the component demo."
+  "Run the component demo. Returns the controller; blocks on await-quit."
   []
-  (let [exec-ctx (ctx/create-execution-context)
-        terminal (tui/create-terminal)]
-
-    (binding [ec/*execution-context* exec-ctx]
-      (tui/enter-raw-mode! terminal)
-
-      (let [display (tui/create-display terminal)
-            signals {:mode (make-signal :mode :input)
-                     :input (make-signal :input (ti/text-input-state
-                                                  :prompt "Enter text: "
-                                                  :placeholder "Type here..."))
-                     :list (make-signal :list (lst/list-state
-                                                ["Option 1" "Option 2" "Option 3"
-                                                 "Option 4" "Option 5" "Option 6"]
-                                                :title "Select Item"
-                                                :height 5))
-                     :spinner (make-signal :spinner (spinner/spinner-state :dots :label "Processing..."))
-                     :progress (make-signal :progress (prog/progress-state :width 20 :show-percent true))
-                     :messages (make-signal :messages ["Welcome to the demo!"
-                                                       "Press Tab to switch modes"
-                                                       "+/- to adjust progress"])}]
-
-        (reset! running true)
-
-        (try
-          (tui/alt-screen-on! terminal)
-          (tui/cursor-hide! terminal)
-
-          (loop [last-state nil
-                 last-tick (System/currentTimeMillis)]
-            (when @running
-              (let [;; Tick spinner
-                    now (System/currentTimeMillis)
-                    _ (when (>= (- now last-tick) 80)
-                        (swap! (:spinner signals) spinner/tick))
-
-                    ;; Get current state
-                    current-state {:mode @(:mode signals)
-                                   :input (ti/value @(:input signals))
-                                   :list (lst/selected-index @(:list signals))
-                                   :spinner (:frame @(:spinner signals))
-                                   :progress (prog/percent @(:progress signals))}
-                    {:keys [width height]} (tui/terminal-size terminal)]
-
-                ;; Render if state changed
-                (when (or (nil? last-state) (not= current-state last-state))
-                  (let [lines (demo-view signals width height)]
-                    (tui/render-lines! display lines width height)))
-
-                ;; Handle input
-                (when-let [event (tui/read-key terminal 16)]
-                  (when (= :quit (demo-on-key signals event))
-                    (reset! running false)))
-
-                (when @running
-                  (recur current-state
-                         (if (>= (- now last-tick) 80) now last-tick))))))
-
-          :done
-
-          (finally
-            (reset! running false)
-            (tui/cursor-show! terminal)
-            (tui/alt-screen-off! terminal)
-            (.close terminal)))))))
+  (let [t (tui/start!
+            {:signals {:mode      :input
+                       :input     (ti/text-input-state
+                                    :prompt "Enter text: "
+                                    :placeholder "Type here...")
+                       :list      (lst/list-state
+                                    ["Option 1" "Option 2" "Option 3"
+                                     "Option 4" "Option 5" "Option 6"]
+                                    :title "Select Item"
+                                    :height 5)
+                       :spinner   (spinner/spinner-state :dots :label "Processing...")
+                       :progress  (prog/progress-state :width 20 :show-percent true)
+                       :messages  ["Welcome to the demo!"
+                                   "Press Tab to switch modes"
+                                   "+/- to adjust progress"]}
+             :render demo-view
+             :on-key demo-on-key})]
+    (start-spinner-driver! t)
+    ((:await-quit t))
+    t))
 
 (defn -main [& _args]
   (demo!))
 
 (comment
-  (demo!)
-  (stop!))
+  (def t (demo!))
+  ((:stop! t)))
