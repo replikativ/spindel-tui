@@ -71,6 +71,14 @@
 (defn cursor-hide! [t] (write! t "[?25l"))
 (defn cursor-show! [t] (write! t "[?25h"))
 
+;; Mouse reporting: 1000 = button events (incl. wheel), 1006 = SGR extended
+;; encoding (`ESC[<b;x;yM`), which read-key parses. Enabling captures the mouse,
+;; so the terminal's own text-selection then needs Shift — hence it's toggleable
+;; via start!'s :set-mouse!. (char 27) is the ESC byte these CSI strings need.
+(def ^:private ^String esc (str (char 27)))
+(defn mouse-on!  [t] (write! t (str esc "[?1000h" esc "[?1006h")))
+(defn mouse-off! [t] (write! t (str esc "[?1000l" esc "[?1006l")))
+
 ;; =============================================================================
 ;; Display (legacy shim — new code should go through sinks/PTerminalSink)
 ;; =============================================================================
@@ -108,6 +116,32 @@
 ;; Input
 ;; =============================================================================
 
+(defn- read-mouse-sgr
+  "Parse an SGR mouse report after the `ESC [ <` introducer: `b;x;y(M|m)`.
+   We only need the button field (the first number) to classify wheel events,
+   so we accumulate it, then DRAIN through the terminating M/m so no trailing
+   bytes leak into the next key. Wheel = button bit 0x40; low bit 0=up, 1=down.
+   Returns {:key :scroll-up/:scroll-down} for the wheel, {:key :mouse} for a
+   click/drag we don't act on, nil on a truncated sequence."
+  [^org.jline.utils.NonBlockingReader r]
+  (loop [btn 0 digit? false]
+    (let [c (.read r 50)]
+      (cond
+        (< c 0) nil
+        (and (>= c 48) (<= c 57)) (recur (+ (* btn 10) (- c 48)) true)
+        :else
+        (do ;; non-digit ends the button field; drain to the M/m terminator
+          (when-not (or (= c 77) (= c 109))
+            (loop [g 0]
+              (let [d (.read r 50)]
+                (when (and (>= d 0) (not= d 77) (not= d 109) (< g 32))
+                  (recur (inc g))))))
+          (if (and digit? (pos? (bit-and btn 0x40)))
+            (if (zero? (bit-and btn 0x01))
+              {:key :scroll-up}
+              {:key :scroll-down})
+            {:key :mouse}))))))
+
 (defn read-key
   "Read key with timeout. Returns nil on timeout, or {:key ... :char ...}"
   [^Terminal t timeout-ms]
@@ -128,6 +162,7 @@
                   (= ch3 68) {:key :left}
                   (= ch3 72) {:key "home"}
                   (= ch3 70) {:key "end"}
+                  (= ch3 60) (read-mouse-sgr r) ; ESC [ < … → SGR mouse
                   (and (>= ch3 48) (<= ch3 57))
                   (let [ch4 (.read r 50)]
                     (if (= ch4 126)
@@ -144,12 +179,10 @@
         (= ch 127) {:key "backspace"}
         (= ch 9) {:key "tab"}
         (= ch 3) {:key "ctrl+c"}
-        (= ch 4) {:key "ctrl+d"}
-        (= ch 10) {:key "ctrl+j"}
-        (= ch 11) {:key "ctrl+k"}
-        (= ch 14) {:key "ctrl+n"}
-        (= ch 16) {:key "ctrl+p"}
-        (= ch 21) {:key "ctrl+u"}
+        ;; Any other control byte → "ctrl+<letter>" (1=ctrl+a … 26=ctrl+z). This
+        ;; covers ctrl+t (20), ctrl+o (15), etc. uniformly; the few cased above
+        ;; (enter/tab/ctrl+c) are matched first and keep their names.
+        (and (>= ch 1) (<= ch 26)) {:key (str "ctrl+" (char (+ 96 ch)))}
         :else {:key (str (char ch)) :char (char ch)}))))
 
 ;; =============================================================================
@@ -358,7 +391,8 @@
      swaps the size signal on change.
    - No work runs on the caller's thread — everything is signal-driven
      from the engine's executor."
-  [{:keys [signals render on-key execution-context sink]}]
+  [{:keys [signals render on-key execution-context sink mouse?]
+    :or {mouse? true}}]
   (let [ctx           (or execution-context (ctx/create-execution-context))
         terminal      (when-not sink (create-terminal))
         own-terminal? (some? terminal)
@@ -382,7 +416,8 @@
 
         (when own-terminal?
           (alt-screen-on! terminal)
-          (cursor-hide! terminal))
+          (cursor-hide! terminal)
+          (when mouse? (mouse-on! terminal)))
 
         ;; Wire the render-spin. Once invoked, Spindel drives re-runs
         ;; via the executor whenever a tracked signal changes.
@@ -411,6 +446,7 @@
                      (when (compare-and-set! stopped? false true)
                        (reset! running false)
                        (when own-terminal?
+                         (try (mouse-off! terminal) (catch Throwable _))
                          (try (cursor-show! terminal) (catch Throwable _))
                          (try (alt-screen-off! terminal) (catch Throwable _))
                          (try (.close terminal) (catch Throwable _)))))
@@ -424,7 +460,12 @@
            :ctx          ctx
            :sink         sink
            :signals      signal-map
-           :render-count render-counter})))))
+           :render-count render-counter
+           ;; Toggle mouse reporting at runtime (e.g. to let the user select +
+           ;; copy text with the native terminal). No-op for caller-owned sinks.
+           :set-mouse!   (fn [on?]
+                           (when own-terminal?
+                             (if on? (mouse-on! terminal) (mouse-off! terminal))))})))))
 
 ;; =============================================================================
 ;; Demo
