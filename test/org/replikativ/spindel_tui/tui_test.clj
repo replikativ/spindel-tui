@@ -16,7 +16,8 @@
             [org.replikativ.spindel.signal :as sig]
             [org.replikativ.spindel.spin.sync :as sync]
             [org.replikativ.spindel-tui.sinks :as sinks]
-            [org.replikativ.spindel-tui.tui :as tui]))
+            [org.replikativ.spindel-tui.tui :as tui])
+  (:import [org.jline.utils NonBlocking]))
 
 ;; =============================================================================
 ;; Helpers
@@ -223,6 +224,23 @@
 ;; Controller-map API
 ;; =============================================================================
 
+(defn- nbr
+  "A NonBlockingReader over a fixed string (what read-mouse-sgr reads from
+   after the `ESC [ <` introducer is already consumed)."
+  [^String s]
+  (NonBlocking/nonBlocking "test" (java.io.StringReader. s)))
+
+(deftest read-mouse-sgr-classifies-wheel
+  (let [parse (requiring-resolve 'org.replikativ.spindel-tui.tui/read-mouse-sgr)]
+    (testing "wheel up (button 64) and down (65), draining through the terminator"
+      (is (= {:key :scroll-up}   (parse (nbr "64;10;20M"))))
+      (is (= {:key :scroll-down} (parse (nbr "65;10;20M")))))
+    (testing "ctrl+wheel keeps the wheel bit (button 64|16 = 80 → still up)"
+      (is (= {:key :scroll-up}   (parse (nbr "80;1;1M")))))
+    (testing "a plain click (button 0, no wheel bit) is :mouse, not a scroll"
+      (is (= {:key :mouse}       (parse (nbr "0;5;5M"))))
+      (is (= {:key :mouse}       (parse (nbr "0;5;5m")))))))
+
 (deftest start!-returns-controller-and-stop-is-idempotent
   (let [ctx  (ctx/create-execution-context)
         sink (sinks/mock-sink)
@@ -236,7 +254,8 @@
                                        (= "q" (:key e)) :quit
                                        (= "+" (:key e)) (do (swap! (:cnt s) inc) nil)))})]
     (testing "controller has the documented keys"
-      (is (= #{:running :stop! :await-quit :ctx :sink :signals :render-count}
+      (is (= #{:running :stop! :await-quit :ctx :sink :signals :render-count
+               :set-mouse!}
              (set (keys t)))))
     (testing "running starts true; ctx and sink are the ones we passed"
       (is (true? @(:running t)))
