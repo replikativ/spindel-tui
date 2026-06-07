@@ -1,5 +1,9 @@
 # spindel-tui
 
+[![Clojars Project](https://img.shields.io/clojars/v/org.replikativ/spindel-tui.svg)](https://clojars.org/org.replikativ/spindel-tui)
+[![CircleCI](https://circleci.com/gh/replikativ/spindel-tui.svg?style=shield)](https://circleci.com/gh/replikativ/spindel-tui)
+[![Slack](https://img.shields.io/badge/slack-join_chat-brightgreen.svg)](https://clojurians.slack.com/archives/C09622F337D)
+
 A reactive terminal UI library for Clojure, built on [JLine 3](https://github.com/jline/jline3) and [Spindel](https://github.com/replikativ/spindel) signals.
 
 ## Overview
