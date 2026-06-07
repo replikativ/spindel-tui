@@ -72,4 +72,5 @@
                            (reset! (get sm k) v) (settle)))
      :resize   (fn [w h] (binding [ec/*execution-context* ctx]
                            (reset! (get sm size-key) {:width w :height h})
-                           (settle)))}))
+                           (settle)))
+     :with-suspended (:with-suspended ctrl)}))

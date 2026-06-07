@@ -182,7 +182,7 @@
                       (= "+" (:key e)) (do (swap! (:cnt s) inc) nil)))]
 
     (binding [ec/*execution-context* ctx]
-      (start-input-consumer!* ctx mbx on-key smap running))
+      (start-input-consumer!* ctx mbx on-key smap running (atom false)))
     (Thread/sleep 50)
 
     (testing "one post → one swap → one new frame"
@@ -255,7 +255,7 @@
                                        (= "+" (:key e)) (do (swap! (:cnt s) inc) nil)))})]
     (testing "controller has the documented keys"
       (is (= #{:running :stop! :await-quit :ctx :sink :signals :render-count
-               :set-mouse!}
+               :set-mouse! :with-suspended}
              (set (keys t)))))
     (testing "running starts true; ctx and sink are the ones we passed"
       (is (true? @(:running t)))

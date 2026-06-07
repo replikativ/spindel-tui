@@ -224,16 +224,22 @@
    pattern works because partial-cps's loop/recur hazard is about
    `await` inside loops, not `track` — track installs a continuation
    and returns synchronously."
-  [sink view signal-map size-sig _render-counter]
-  (spin
-    (let [{:keys [width height]} (iv/get-new (track size-sig))
-          _ (doseq [[k s] signal-map
-                    :when (and (not= k :tui-ctx)
-                               (not= k ::size))]
-              (track s))
-          lines (view signal-map width height)]
-      (sinks/render-frame! sink lines width height)
-      ::rendered)))
+  ([sink view signal-map size-sig render-counter]
+   (make-render-spin sink view signal-map size-sig render-counter nil))
+  ([sink view signal-map size-sig _render-counter paused?]
+   (spin
+     (let [{:keys [width height]} (iv/get-new (track size-sig))
+           _ (doseq [[k s] signal-map
+                     :when (and (not= k :tui-ctx)
+                                (not= k ::size))]
+               (track s))
+           lines (view signal-map width height)]
+       ;; While suspended (see `:with-suspended`), keep tracking signals but DON'T
+       ;; write — a child process (e.g. $EDITOR) owns the tty, so a stray frame
+       ;; would corrupt its screen. The post-resume repaint emits the latest frame.
+       (when-not (and paused? @paused?)
+         (sinks/render-frame! sink lines width height))
+       ::rendered))))
 
 ;; =============================================================================
 ;; Input source — dedicated reader thread + Spindel mailbox
@@ -258,7 +264,7 @@
 
    sync/post! enqueues onto the context's event queue, so the reader
    thread must have *execution-context* bound."
-  [ctx ^Terminal terminal mbx running-atom]
+  [ctx ^Terminal terminal mbx running-atom paused-atom]
   (doto (Thread.
           ^Runnable
           (fn []
@@ -267,8 +273,11 @@
                 (while @running-atom
                   ;; Short timeout so we wake up periodically to check
                   ;; `running` even when the user isn't typing.
-                  (when-let [event (read-key terminal 100)]
-                    (sync/post! mbx event)))
+                  (if (and paused-atom @paused-atom)
+                    ;; Suspended: don't touch the tty — a child process owns it.
+                    (Thread/sleep 50)
+                    (when-let [event (read-key terminal 100)]
+                      (sync/post! mbx event))))
                 (catch InterruptedException _ nil)
                 (catch Throwable t
                   (binding [*out* *err*]
@@ -315,7 +324,7 @@
    and the recursive consume. Without this, mailbox internals (which
    call enqueue-event! to schedule resumes) crash with 'no execution
    context bound'."
-  [ctx mbx on-key signal-map running-atom]
+  [ctx mbx on-key signal-map running-atom paused-atom]
   (letfn [(consume []
             (when @running-atom
               (binding [ec/*execution-context* ctx]
@@ -329,12 +338,15 @@
 
                           :else
                           (do
-                            (try
-                              (when (= :quit (on-key signal-map event))
-                                (reset! running-atom false))
-                              (catch Throwable t
-                                (binding [*out* *err*]
-                                  (println "on-key error:" (.getMessage t)))))
+                            ;; Drop events while suspended (the child owns input);
+                            ;; keep re-arming so the consumer survives the pause.
+                            (when-not (and paused-atom @paused-atom)
+                              (try
+                                (when (= :quit (on-key signal-map event))
+                                  (reset! running-atom false))
+                                (catch Throwable t
+                                  (binding [*out* *err*]
+                                    (println "on-key error:" (.getMessage t))))))
                             (consume))))))
                   (fn [err]
                     (binding [ec/*execution-context* ctx
@@ -398,7 +410,11 @@
         own-terminal? (some? terminal)
         sink          (or sink (sinks/jline-sink terminal))
         running       (atom true)
-        stopped?      (atom false)]
+        stopped?      (atom false)
+        paused?       (atom false)
+        ;; The terminal's normal attributes, captured BEFORE raw mode so
+        ;; `:with-suspended` can hand a child process (e.g. $EDITOR) a cooked tty.
+        orig-attrs    (when own-terminal? (.getAttributes ^Terminal terminal))]
 
     (binding [ec/*execution-context* ctx]
       (when own-terminal? (enter-raw-mode! terminal))
@@ -408,8 +424,9 @@
                                   (if terminal
                                     (terminal-size terminal)
                                     {:width 80 :height 24}))
-            signal-map (into {:tui-ctx ctx
-                              ::size   size-sig}
+            signal-map (into {:tui-ctx  ctx
+                              ::size    size-sig
+                              ::repaint (make-signal ::repaint 0)}
                              (map (fn [[k v]]
                                     [k (make-signal k v)])
                                   signals))]
@@ -421,7 +438,7 @@
 
         ;; Wire the render-spin. Once invoked, Spindel drives re-runs
         ;; via the executor whenever a tracked signal changes.
-        (let [the-spin (make-render-spin sink render signal-map size-sig render-counter)]
+        (let [the-spin (make-render-spin sink render signal-map size-sig render-counter paused?)]
           (the-spin
             (fn [_] (swap! render-counter inc))
             (fn [e]
@@ -432,8 +449,8 @@
         ;; Input: reader thread → Spindel mailbox → consume callback.
         (let [input-mbx (sync/create-mailbox ctx)]
           (when own-terminal?
-            (start-input-reader! ctx terminal input-mbx running)
-            (start-input-consumer! ctx input-mbx on-key signal-map running)))
+            (start-input-reader! ctx terminal input-mbx running paused?)
+            (start-input-consumer! ctx input-mbx on-key signal-map running paused?)))
 
         ;; Size: side thread polls terminal-size, swaps signal on change.
         (when own-terminal?
@@ -465,7 +482,38 @@
            ;; copy text with the native terminal). No-op for caller-owned sinks.
            :set-mouse!   (fn [on?]
                            (when own-terminal?
-                             (if on? (mouse-on! terminal) (mouse-off! terminal))))})))))
+                             (if on? (mouse-on! terminal) (mouse-off! terminal))))
+           ;; Run `thunk` with the TUI suspended — input + rendering paused, and
+           ;; (for an owned terminal) the tty returned to its normal mode + main
+           ;; screen — so a child process (e.g. `$EDITOR`) can take over the
+           ;; terminal. Restores raw mode / alt-screen / mouse and forces a
+           ;; repaint afterwards. Runs on a dedicated thread (so the engine
+           ;; executor isn't blocked for the child's lifetime) and returns a
+           ;; future of the thunk's result.
+           :with-suspended
+           (fn [thunk]
+             (future
+               (binding [ec/*execution-context* ctx]
+                 (reset! paused? true)
+                 (try
+                   (when own-terminal?
+                     (when mouse? (mouse-off! terminal))
+                     (cursor-show! terminal)
+                     (alt-screen-off! terminal)
+                     (.setAttributes ^Terminal terminal orig-attrs))
+                   (thunk)
+                   (finally
+                     (when own-terminal?
+                       (enter-raw-mode! terminal)
+                       (alt-screen-on! terminal)
+                       (cursor-hide! terminal)
+                       (when mouse? (mouse-on! terminal)))
+                     (reset! paused? false)
+                     ;; The child clobbered the screen, so JLine's diff cache is
+                     ;; stale — invalidate it, then bump ::repaint to emit a full
+                     ;; frame onto the freshly-restored screen.
+                     (sinks/invalidate! sink)
+                     (swap! (get signal-map ::repaint) inc)))))) })))))
 
 ;; =============================================================================
 ;; Demo

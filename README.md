@@ -101,10 +101,28 @@ The render fn MUST NOT call `swap!`/`reset!` on a signal that's in the signal-ma
  :ctx          <ec>            ; the execution context
  :sink         <PTerminalSink> ; the sink in use (JLine by default)
  :signals      map             ; resolved signal-map (incl. :tui-ctx + ::size)
- :render-count atom}           ; frames rendered (test instrumentation)
+ :render-count atom            ; frames rendered (test instrumentation)
+ :set-mouse!   (fn [on?])      ; toggle mouse reporting at runtime
+ :with-suspended (fn [thunk])} ; run thunk with the TUI suspended (see below)
 ```
 
 You can run multiple TUI instances per JVM; nothing is held in a global.
+
+### Suspending for a child process (`$EDITOR`, pagers, …)
+
+`(:with-suspended ctrl)` takes a thunk and runs it with the TUI suspended: input
+and rendering are paused, and (for an owned terminal) the tty is returned to its
+normal mode + main screen so a child process can take it over. Raw mode,
+alt-screen, cursor, and mouse are restored afterwards and a repaint is forced. It
+runs the thunk on a dedicated thread (so the engine executor isn't blocked for the
+child's lifetime) and returns a `future` of the thunk's result.
+
+```clojure
+@((:with-suspended ctrl)
+  (fn []
+    (-> (ProcessBuilder. [(or (System/getenv "EDITOR") "vi") path])
+        (.inheritIO) (.start) (.waitFor))))
+```
 
 ## Sinks
 

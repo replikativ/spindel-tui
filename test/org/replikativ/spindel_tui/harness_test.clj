@@ -16,6 +16,30 @@
         (is (re-find #"n=1" ((:text h))) "render re-fired on signal change")
         (finally ((:stop! h)))))))
 
+(deftest with-suspended-pauses-render-then-repaints
+  (testing "rendering is suspended for the thunk's duration, then repaints"
+    (let [h (h/harness
+              {:signals {:n 0}
+               :render  (fn [sm _w _h] [(str "n=" @(:n sm))])
+               :on-key  (fn [_sm _ev] nil)})]
+      (try
+        (is (re-find #"n=0" ((:text h))) "initial frame")
+        (let [fut ((:with-suspended h)
+                   (fn []
+                     ;; ctx is bound by :with-suspended, so the signal write here
+                     ;; fires the render-spin — which must SKIP writing (paused).
+                     (reset! (:n (:signals h)) 9)
+                     (Thread/sleep 150)
+                     :done))]
+          (Thread/sleep 60)
+          (is (re-find #"n=0" ((:text h)))
+              "render stays on the old frame while suspended")
+          (is (= :done @fut) "thunk result delivered via the future")
+          (Thread/sleep 60)
+          (is (re-find #"n=9" ((:text h)))
+              "repaint after resume shows the change made while suspended"))
+        (finally ((:stop! h)))))))
+
 (deftest harness-resize-drives-render
   (testing "resize is reflected in the render width/height args"
     (let [h (h/harness

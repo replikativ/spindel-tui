@@ -22,7 +22,11 @@
   "A surface the render-spin can write frames to."
   (render-frame! [this lines width height]
     "Write a frame of `lines` to the sink at the given dimensions.
-     Implementations must handle dimension changes between frames."))
+     Implementations must handle dimension changes between frames.")
+  (invalidate! [this]
+    "Drop any cached diff state so the next `render-frame!` repaints from
+     scratch. Call after something external clobbers the screen (e.g. a child
+     process launched via the controller's `:with-suspended`)."))
 
 ;; =============================================================================
 ;; JLine sink — production
@@ -59,7 +63,8 @@
       (when (and prev (not= prev [width height]))
         (.clear display)))
     (reset! last-size [width height])
-    (jline-write-frame! display lines width height)))
+    (jline-write-frame! display lines width height))
+  (invalidate! [_] (.clear display)))
 
 (defn jline-sink
   "Build a JLineSink wrapping the given Terminal. Caller owns the
@@ -77,7 +82,8 @@
 (defrecord MockSink [frames]
   PTerminalSink
   (render-frame! [_ lines width height]
-    (swap! frames conj {:lines (vec lines) :width width :height height})))
+    (swap! frames conj {:lines (vec lines) :width width :height height}))
+  (invalidate! [_] nil))
 
 (defn mock-sink
   "Build a MockSink that records every frame to an atom for inspection."
