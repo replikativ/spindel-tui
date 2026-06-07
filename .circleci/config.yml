@@ -8,10 +8,6 @@ workflows:
     jobs:
       - tools/setup:
           context: docker-deploy
-      - tools/build:
-          context: docker-deploy
-          requires:
-            - tools/setup
       - tools/format:
           context: docker-deploy
           requires:
@@ -19,7 +15,7 @@ workflows:
       - tools/unittest:
           context: docker-deploy
           requires:
-            - tools/build
+            - tools/setup
       - tools/deploy:
           context:
             - clojars-deploy
