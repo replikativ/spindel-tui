@@ -16,8 +16,18 @@ spindel-tui is a spin-native TUI runner: the render is a Spindel spin that track
 
 ## Coordinates
 
+Released on Clojars by CI (CircleCI deploys `org.replikativ/spindel-tui` from
+`main`; the version is git-derived). Use the latest version from
+[Clojars](https://clojars.org/org.replikativ/spindel-tui):
+
 ```clojure
 ;; deps.edn
+org.replikativ/spindel-tui {:mvn/version "RELEASE"}
+```
+
+Or track `main` directly:
+
+```clojure
 org.replikativ/spindel-tui {:git/url "https://github.com/replikativ/spindel-tui"
                              :git/sha "<sha>"}
 ```
