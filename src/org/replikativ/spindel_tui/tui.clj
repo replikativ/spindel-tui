@@ -471,6 +471,14 @@
                            (try
                              (while @running (Thread/sleep 200))
                              (finally (stop!))))]
+          ;; Restore the terminal on JVM shutdown (Ctrl+C / SIGINT / SIGTERM):
+          ;; otherwise an interrupt kills the process with the tty still in raw
+          ;; mode + alt-screen + mouse tracking, wedging the user's terminal.
+          ;; stop! is idempotent, so this composes fine with an explicit
+          ;; (:stop!) / await-quit shutdown. (dvergr issue #4)
+          (when own-terminal?
+            (.addShutdownHook (Runtime/getRuntime)
+                              (Thread. ^Runnable (fn [] (stop!)) "spindel-tui-cleanup")))
           {:running      running
            :stop!        stop!
            :await-quit   await-quit
