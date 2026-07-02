@@ -18,6 +18,33 @@
   (:import [org.jline.terminal Terminal]
            [org.jline.utils Display AttributedString]))
 
+;; dvergr issue #5 — box-drawing borders (│ ─ ┌ └ …) render as garbage under tmux.
+;;
+;; Our lines carry real Unicode box-drawing chars. JLine's
+;; AttributedCharSequence.toAnsi(Terminal) (invoked internally by
+;; Display.update) translates those code points into the terminal's terminfo
+;; alternate-character-set (ACS) sequence: it wraps them in
+;; enter_alt_charset_mode / exit_alt_charset_mode (smacs/rmacs — e.g. `ESC(0` …
+;; `ESC(B`, or SO/SI) and substitutes the VT100 line-drawing glyphs (│→x,
+;; ─→q, ┌→l, …). tmux mishandles this ACS mapping and shows garbage.
+;;
+;; JLine gates that translation on a JVM system property read ONCE in
+;; AttributedCharSequence's static initializer:
+;;   static final boolean DISABLE_ALTERNATE_CHARSET =
+;;       Boolean.getBoolean("org.jline.utils.disableAlternateCharset");
+;; (the property name is also exposed as TerminalBuilder/PROP_DISABLE_ALTERNATE_CHARSET).
+;; When true, toAnsi skips the smacs/rmacs wrapping and emits the box chars as
+;; plain UTF-8 — which tmux, and every modern UTF-8 terminal, renders correctly.
+;;
+;; The static field is read at first *use* of AttributedString (a runtime frame
+;; render), not at class load / `:import`, so setting the property here at
+;; namespace load (this ns is where AttributedString is instantiated, and
+;; tui.clj requires it) is early enough. We only default it on when unset so an
+;; operator can still force the legacy ACS path via
+;; `-Dorg.jline.utils.disableAlternateCharset=false`.
+(when (nil? (System/getProperty "org.jline.utils.disableAlternateCharset"))
+  (System/setProperty "org.jline.utils.disableAlternateCharset" "true"))
+
 (defprotocol PTerminalSink
   "A surface the render-spin can write frames to."
   (render-frame! [this lines width height]
