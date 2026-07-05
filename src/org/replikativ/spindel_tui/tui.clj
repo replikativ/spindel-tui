@@ -79,6 +79,33 @@
 (defn mouse-on!  [t] (write! t (str esc "[?1000h" esc "[?1006h")))
 (defn mouse-off! [t] (write! t (str esc "[?1000l" esc "[?1006l")))
 
+;; Charset reset: designate ASCII to G0 (`ESC ( B`) and SI (shift-in, 0x0f) back
+;; to G0. Clears a stuck VT100 line-drawing (G1/SO) state that neither
+;; `stty sane` nor an alt-screen reset fixes — the wedge symptom in dvergr #4.
+(defn charset-reset! [t] (write! t (str esc "(B" (char 15))))
+
+;; The full terminal-restore sequence as one string: mouse off, cursor shown,
+;; alt-screen off, charset reset, then a DECSTR soft reset (`ESC [ ! p`). Emitted
+;; on the signal path straight to /dev/tty, where the JLine writer may be
+;; unusable.
+(def ^:private ^String reset-seq
+  (str esc "[?1000l" esc "[?1006l"    ; mouse off
+       esc "[?25h"                     ; cursor show
+       esc "[?1049l"                   ; alt-screen off
+       esc "(B" (char 15)              ; charset: G0 = ASCII + SI
+       esc "[!p"))                     ; DECSTR soft reset
+
+(defn- restore-tty!
+  "Write `reset-seq` directly to the controlling tty. Used from the signal
+   handler, where the JLine terminal writer may be in a bad state after an
+   interrupt — /dev/tty always reaches the real terminal."
+  []
+  (try
+    (with-open [w (java.io.FileWriter. "/dev/tty")]
+      (.write w reset-seq)
+      (.flush w))
+    (catch Throwable _ nil)))
+
 ;; =============================================================================
 ;; Display (legacy shim — new code should go through sinks/PTerminalSink)
 ;; =============================================================================
@@ -466,17 +493,32 @@
                          (try (mouse-off! terminal) (catch Throwable _))
                          (try (cursor-show! terminal) (catch Throwable _))
                          (try (alt-screen-off! terminal) (catch Throwable _))
+                         (try (charset-reset! terminal) (catch Throwable _))
                          (try (.close terminal) (catch Throwable _)))))
               await-quit (fn []
                            (try
                              (while @running (Thread/sleep 200))
                              (finally (stop!))))]
-          ;; Restore the terminal on JVM shutdown (Ctrl+C / SIGINT / SIGTERM):
-          ;; otherwise an interrupt kills the process with the tty still in raw
-          ;; mode + alt-screen + mouse tracking, wedging the user's terminal.
-          ;; stop! is idempotent, so this composes fine with an explicit
-          ;; (:stop!) / await-quit shutdown. (dvergr issue #4)
+          ;; Restore the terminal on Ctrl+C / SIGINT / SIGTERM. On setups where
+          ;; raw mode keeps ISIG, Ctrl+C is delivered as a SIGNAL (not byte
+          ;; 0x03), so the in-TUI quit path never fires and the JVM dies with the
+          ;; tty wedged (raw mode + alt-screen + mouse + a stuck line-drawing
+          ;; charset). A JVM shutdown hook alone proved unreliable here (JLine's
+          ;; own signal disposition / an unflushed writer), so install EXPLICIT
+          ;; INT/TERM handlers that run the idempotent stop!, force the reset
+          ;; straight to /dev/tty, and exit cleanly. The shutdown hook stays as a
+          ;; final net for other exit paths. (dvergr issue #4)
           (when own-terminal?
+            (letfn [(on-signal [_]
+                      (try (stop!) (catch Throwable _))
+                      (restore-tty!)
+                      (System/exit 130))]
+              (doseq [sig ["INT" "TERM"]]
+                (try
+                  (sun.misc.Signal/handle
+                   (sun.misc.Signal. sig)
+                   (reify sun.misc.SignalHandler (handle [_ s] (on-signal s))))
+                  (catch Throwable _ nil))))
             (.addShutdownHook (Runtime/getRuntime)
                               (Thread. ^Runnable (fn [] (stop!)) "spindel-tui-cleanup")))
           {:running      running
